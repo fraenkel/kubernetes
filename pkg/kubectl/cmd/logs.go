@@ -41,6 +41,9 @@ var (
 		# Return snapshot logs from pod nginx with only one container
 		kubectl logs nginx
 
+		# Return snapshot logs for the pods defined by label app=nginx
+		kubectl logs -lapp=nginx
+
 		# Return snapshot of previous terminated ruby container logs from pod web-1
 		kubectl logs -p -c ruby web-1
 
@@ -103,7 +106,7 @@ func NewCmdLogs(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().Bool("timestamps", false, "Include timestamps on each line in the log output")
 	cmd.Flags().Int64("limit-bytes", 0, "Maximum bytes of logs to return. Defaults to no limit.")
 	cmd.Flags().BoolP("previous", "p", false, "If true, print the logs for the previous instance of the container in a pod if it exists.")
-	cmd.Flags().Int64("tail", -1, "Lines of recent log file to display. Defaults to -1, showing all log lines.")
+	cmd.Flags().Int64("tail", -1, "Lines of recent log file to display. Defaults to -1 with no selector, showing all log lines otherwise 10, if a selector is provided.")
 	cmd.Flags().String("since-time", "", "Only return logs after a specific date (RFC3339). Defaults to all logs. Only one of since-time / since may be used.")
 	cmd.Flags().Duration("since", 0, "Only return logs newer than a relative duration like 5s, 2m, or 3h. Defaults to all logs. Only one of since-time / since may be used.")
 	cmd.Flags().StringP("container", "c", "", "Print the logs of this container")
@@ -111,7 +114,7 @@ func NewCmdLogs(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().Bool("interactive", false, "If true, prompt the user for input when required.")
 	cmd.Flags().MarkDeprecated("interactive", "This flag is no longer respected and there is no replacement.")
 	cmdutil.AddInclude3rdPartyFlags(cmd)
-	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on")
+	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on.")
 	return cmd
 }
 
@@ -120,12 +123,12 @@ func (o *LogsOptions) Complete(f *cmdutil.Factory, out io.Writer, cmd *cobra.Com
 	selector := cmdutil.GetFlagString(cmd, "selector")
 	switch len(args) {
 	case 0:
-		if selector == "" {
+		if len(selector) == 0 {
 			return cmdutil.UsageError(cmd, logsUsageStr)
 		}
 	case 1:
 		o.ResourceArg = args[0]
-		if selector != "" {
+		if len(selector) != 0 {
 			return cmdutil.UsageError(cmd, "only a selector (-l) or a POD name is allowed")
 		}
 	case 2:
@@ -172,14 +175,18 @@ func (o *LogsOptions) Complete(f *cmdutil.Factory, out io.Writer, cmd *cobra.Com
 	o.ClientMapper = resource.ClientMapperFunc(f.ClientForMapping)
 	o.Out = out
 
-	if selector != "" {
+	if len(selector) != 0 {
 		if logOptions.Follow {
 			return cmdutil.UsageError(cmd, "only one of follow (-f) or selector (-l) is allowed")
+		}
+		if len(logOptions.Container) != 0 {
+			return cmdutil.UsageError(cmd, "a container cannot be specified when using a selector (-l)")
 		}
 		if logOptions.TailLines == nil {
 			logOptions.TailLines = &selectorTail
 		}
 	}
+
 	mapper, typer := f.Object()
 	decoder := f.Decoder(true)
 	if o.Object == nil {
@@ -222,16 +229,33 @@ func (o LogsOptions) RunLogs() (int64, error) {
 	switch t := o.Object.(type) {
 	case *api.PodList:
 		cnt := int64(0)
-		for _, p := range t.Items {
-			fmt.Fprintf(o.Out, "======== %s\n", p.Name)
-			len, _ := o.runLogs(&p)
-			cnt += len
+		logsOptions, ok := o.Options.(*api.PodLogOptions)
+		if !ok {
+			return 0, errors.New("unexpected logs options object")
 		}
-		return cnt, nil
+		var err error
+		for _, p := range t.Items {
+			for _, c := range p.Spec.Containers {
+				fmt.Fprintf(o.Out, "======== %s %s\n", p.Name, c.Name)
+				logsOptions.Container = c.Name
+				len, cerr := o.runLogs(&p)
+				if cerr != nil {
+					msg, ok := cmdutil.StandardErrorMessage(cerr)
+					if !ok {
+						msg = cerr.Error()
+					}
+					fmt.Fprintln(o.Out, msg)
+					if err == nil {
+						err = errors.New("error(s) occurred")
+					}
+				}
+				cnt += len
+			}
+		}
+		return cnt, err
 	default:
 		return o.runLogs(o.Object)
 	}
-
 }
 
 func (o LogsOptions) runLogs(obj runtime.Object) (int64, error) {
