@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"os"
@@ -97,8 +96,7 @@ func NewCmdLogs(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 			if err := o.Validate(); err != nil {
 				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
 			}
-			_, err := o.RunLogs()
-			cmdutil.CheckErr(err)
+			cmdutil.CheckErr(o.RunLogs())
 		},
 		Aliases: []string{"log"},
 	}
@@ -225,50 +223,32 @@ func (o LogsOptions) Validate() error {
 }
 
 // RunLogs retrieves a pod log
-func (o LogsOptions) RunLogs() (int64, error) {
+func (o LogsOptions) RunLogs() error {
 	switch t := o.Object.(type) {
 	case *api.PodList:
-		cnt := int64(0)
-		logsOptions, ok := o.Options.(*api.PodLogOptions)
-		if !ok {
-			return 0, errors.New("unexpected logs options object")
-		}
-		var err error
 		for _, p := range t.Items {
-			for _, c := range p.Spec.Containers {
-				fmt.Fprintf(o.Out, "======== %s %s\n", p.Name, c.Name)
-				logsOptions.Container = c.Name
-				len, cerr := o.runLogs(&p)
-				if cerr != nil {
-					msg, ok := cmdutil.StandardErrorMessage(cerr)
-					if !ok {
-						msg = cerr.Error()
-					}
-					fmt.Fprintln(o.Out, msg)
-					if err == nil {
-						err = errors.New("error(s) occurred")
-					}
-				}
-				cnt += len
+			if err := o.getLogs(&p); err != nil {
+				return err
 			}
 		}
-		return cnt, err
+		return nil
 	default:
-		return o.runLogs(o.Object)
+		return o.getLogs(o.Object)
 	}
 }
 
-func (o LogsOptions) runLogs(obj runtime.Object) (int64, error) {
+func (o LogsOptions) getLogs(obj runtime.Object) error {
 	req, err := o.LogsForObject(obj, o.Options)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	readCloser, err := req.Stream()
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer readCloser.Close()
 
-	return io.Copy(o.Out, readCloser)
+	_, err = io.Copy(o.Out, readCloser)
+	return err
 }
